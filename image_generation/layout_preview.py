@@ -200,7 +200,7 @@ def _render_terminal(draw: ImageDraw.ImageDraw, placed: PlacedNode, value: str |
     height = placed.height * CELL_SIZE
     fill = OUTPUT_FILL if is_output else DISCARD_FILL
     outline = OUTPUT_OUTLINE if is_output else DISCARD_OUTLINE
-    title = "Output" if is_output else "Discard"
+    title = "输出" if is_output else "回流"
     draw.rounded_rectangle(
         (x + 8, y + 8, x + width - 8, y + height - 8), radius=12, fill=fill, outline=outline, width=2
     )
@@ -349,6 +349,24 @@ def _load_icon(icon_path: Path) -> Image.Image:
 @lru_cache(maxsize=None)
 def _load_font(size: int, bold: bool = False) -> ImageFont.ImageFont:
     candidates = []
+    if bold:
+        candidates.extend(
+            [
+                Path("C:/Windows/Fonts/msyhbd.ttc"),
+                Path("C:/Windows/Fonts/msyhbd.ttf"),
+                Path("C:/Windows/Fonts/simhei.ttf"),
+                Path("C:/Windows/Fonts/Dengb.ttf"),
+            ]
+        )
+    candidates.extend(
+        [
+            Path("C:/Windows/Fonts/msyh.ttc"),
+            Path("C:/Windows/Fonts/msyh.ttf"),
+            Path("C:/Windows/Fonts/simhei.ttf"),
+            Path("C:/Windows/Fonts/simsun.ttc"),
+            Path("C:/Windows/Fonts/Deng.ttf"),
+        ]
+    )
     if bold:
         candidates.extend(
             [

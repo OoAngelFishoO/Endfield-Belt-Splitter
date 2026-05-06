@@ -11,6 +11,7 @@ from tkinter import StringVar, Tk
 from tkinter import messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 import tkinter as tk
+import tkinter.font as tkfont
 
 from PIL import Image, ImageTk
 
@@ -25,19 +26,30 @@ for import_dir in (SCRIPT_DIR, TREE_DIR, IMAGE_DIR):
 from NSGA2 import Config, NSGA2
 from layout_preview import render_tree_preview_from_dict
 
+APP_NAME = "EndfieldBeltSplitter"
+APP_TITLE = "明日方舟：终末地 - 传送带分流计算器"
+APP_VERSION = "1.1.0"
 
-DEFAULT_TARGET = "325/799"
-RESULT_LIMIT = 7
+TARGET_RATE_DIVISOR = Fraction(30, 1)
+DEFAULT_TARGET = Fraction(325, 799)
+DEFAULT_TARGET_RATE = DEFAULT_TARGET * TARGET_RATE_DIVISOR
+DEFAULT_TARGET_FRACTION_PLACEHOLDER = "325/799"
+DEFAULT_TARGET_RATE_PLACEHOLDER = f"{float(DEFAULT_TARGET_RATE):.1f}"
+RESULT_LIMIT = 20
 FAST_PRESET_LABEL = "Fast"
 SLOW_PRESET_LABEL = "Slow"
 DEFAULT_SIDEBAR_WIDTH = 300
 DEFAULT_TREE_HEIGHT = 180
 GA_ENTRY_WIDTH = 5
+TARGET_MODE_FRACTION = "fraction"
+TARGET_MODE_RATE = "rate"
 
 
 @dataclass
 class SearchSettings:
+    target_input_mode: str
     target_value: Fraction
+    target_rate_per_min: Fraction
     population_size: int
     max_generations: int
     max_depth: int
@@ -96,13 +108,32 @@ def format_error_percentage(error: float, target_value: Fraction | float | str) 
     return f"{error / abs(target) * 100:.2f}%"
 
 
+def format_target_rate(rate_per_min: Fraction | float | str) -> str:
+    rate = float(Fraction(rate_per_min))
+    return f"{rate:.3f}".rstrip("0").rstrip(".")
+
+
+def format_target_expression(rate_per_min: Fraction | float | str) -> str:
+    rate_fraction = Fraction(rate_per_min)
+    target_value = rate_fraction / TARGET_RATE_DIVISOR
+    return f"{format_target_rate(rate_fraction)}/30 ≈ {float(target_value):.6f}"
+
+
+def format_fraction_target_expression(target_value: Fraction | float | str) -> str:
+    target_fraction = Fraction(target_value)
+    return f"{target_fraction} ≈ {float(target_fraction):.6f}"
+
+
 class TopologySearchApp:
     def __init__(self) -> None:
         self.root = Tk()
-        self.root.title("明日方舟：终末地 传送带分流计算器")
+        self.root.title(f"{APP_TITLE} - v{APP_VERSION}")
         self.root.state("zoomed")
+        self._configure_ui_font()
+        self.default_entry_foreground = "black"
+        self.placeholder_entry_foreground = "#888888"
 
-        self.target_var = StringVar(value=DEFAULT_TARGET)
+        self.target_var = StringVar(value="")
         self.population_var = StringVar(value=str(DEFAULT_PRESET.population_size))
         self.generations_var = StringVar(value=str(DEFAULT_PRESET.max_generations))
         self.max_depth_var = StringVar(value=str(DEFAULT_PRESET.max_depth))
@@ -114,6 +145,8 @@ class TopologySearchApp:
 
         self.solutions: list[SolutionSummary] = []
         self.search_thread: threading.Thread | None = None
+        self.stop_search_event = threading.Event()
+        self.stop_requested = False
         self.current_preview: ImageTk.PhotoImage | None = None
         self.current_settings: SearchSettings | None = None
         self.preview_source_image: Image.Image | None = None
@@ -121,9 +154,55 @@ class TopologySearchApp:
         self.preview_manual_zoom = False
         self.content: ttk.Panedwindow | None = None
         self._initial_layout_applied = False
+        self.ga_params_collapsed = True
+        self.ga_params_container: ttk.Frame | None = None
+        self.ga_toggle_button: ttk.Button | None = None
+        self.target_mode = TARGET_MODE_FRACTION
+        self.target_mode_button: ttk.Button | None = None
+        self.target_suffix_label: ttk.Label | None = None
+        self.target_placeholder_active = False
+        self.editable_entries: list[ttk.Entry] = []
 
         self._build_ui()
+        self._refresh_target_mode_widgets()
+        self._activate_target_placeholder()
+        self.root.bind_all("<Button-1>", self._clear_entry_selection_on_click, add="+")
         self.root.after(100, self._apply_initial_layout)
+
+    def _configure_ui_font(self) -> None:
+        preferred_families = [
+            "Microsoft YaHei UI",
+            "Microsoft YaHei",
+            "微软雅黑",
+            "PingFang SC",
+            "Noto Sans CJK SC",
+            "SimHei",
+            "黑体",
+            "DengXian",
+            "等线",
+        ]
+        available_families = set(tkfont.families(self.root))
+        selected_family = next((name for name in preferred_families if name in available_families), None)
+        if selected_family is None:
+            return
+
+        named_fonts = [
+            "TkDefaultFont",
+            "TkTextFont",
+            "TkHeadingFont",
+            "TkMenuFont",
+            "TkCaptionFont",
+            "TkSmallCaptionFont",
+            "TkIconFont",
+            "TkTooltipFont",
+            "TkFixedFont",
+        ]
+        for font_name in named_fonts:
+            try:
+                named_font = tkfont.nametofont(font_name)
+            except tk.TclError:
+                continue
+            named_font.configure(family=selected_family)
 
     def _build_ui(self) -> None:
         self.root.columnconfigure(0, weight=1)
@@ -144,17 +223,33 @@ class TopologySearchApp:
         search_frame = ttk.LabelFrame(sidebar, text="搜索", padding=10)
         search_frame.grid(row=0, column=0, sticky="nsew")
         search_frame.columnconfigure(0, minsize=52)
-        search_frame.columnconfigure(1, minsize=128)
-        search_frame.columnconfigure(2, minsize=64)
+        search_frame.columnconfigure(1, minsize=0)
+        search_frame.columnconfigure(2, minsize=40)
+        search_frame.columnconfigure(3, weight=1)
+        search_frame.columnconfigure(4, minsize=0)
         search_frame.rowconfigure(3, weight=1)
         search_frame.bind("<Configure>", self._on_search_frame_resize)
 
         ttk.Label(search_frame, text="目标值").grid(row=0, column=0, padx=(0, 8), pady=4, sticky="w")
-        self.target_entry = ttk.Entry(search_frame, textvariable=self.target_var, width=18)
-        self.target_entry.grid(row=0, column=1, padx=(0, 8), pady=4, sticky="ew")
+        self.target_entry = ttk.Entry(search_frame, textvariable=self.target_var, width=7)
+        self.target_entry.grid(row=0, column=1, padx=(0, 4), pady=4, sticky="w")
+        self.target_entry.bind("<FocusIn>", self._on_target_focus_in)
+        self.target_entry.bind("<FocusOut>", self._on_target_focus_out)
+        self.target_suffix_label = ttk.Label(search_frame, text="/min")
+        self.target_suffix_label.grid(row=0, column=2, padx=(0, 8), pady=4, sticky="w")
+        button_frame = ttk.Frame(search_frame)
+        button_frame.grid(row=0, column=4, padx=(0, 0), pady=4, sticky="e")
+        self.target_mode_button = ttk.Button(
+            button_frame,
+            text="分数",
+            width=5,
+            command=self._toggle_target_mode,
+            takefocus=False,
+        )
+        self.target_mode_button.grid(row=0, column=0, padx=(0, 16), pady=0, sticky="e")
 
-        self.run_button = ttk.Button(search_frame, text="搜索", width=7, command=self.start_search)
-        self.run_button.grid(row=0, column=2, padx=(8, 0), pady=4, sticky="e")
+        self.run_button = ttk.Button(button_frame, text="搜索", width=5, command=self.start_search, takefocus=False)
+        self.run_button.grid(row=0, column=1, padx=(0, 0), pady=0, sticky="e")
 
         self.status_label = tk.Label(
             search_frame,
@@ -164,47 +259,83 @@ class TopologySearchApp:
             height=2,
             background=self.root.cget("background"),
         )
-        self.status_label.grid(
-            row=1, column=0, columnspan=3, pady=(4, 8), sticky="ew"
-        )
+        self.status_label.grid(row=1, column=0, columnspan=5, pady=(4, 8), sticky="ew")
 
         ga_frame = ttk.LabelFrame(sidebar, text="遗传算法参数", padding=10)
         ga_frame.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
+        ga_frame.columnconfigure(0, weight=1)
 
-        ttk.Label(ga_frame, text="预设").grid(row=0, column=0, padx=(0, 8), pady=4, sticky="w")
+        ga_header = ttk.Frame(ga_frame)
+        ga_header.grid(row=0, column=0, sticky="ew")
+        ga_header.columnconfigure(4, weight=1)
+
+        ttk.Label(ga_header, text="预设").grid(row=0, column=0, padx=(0, 8), pady=4, sticky="w")
         self.fast_preset_button = ttk.Button(
-            ga_frame,
+            ga_header,
             text="Fast",
             width=GA_ENTRY_WIDTH,
+            takefocus=False,
             command=lambda: self._apply_preset(FAST_PRESET_LABEL),
         )
-        self.fast_preset_button.grid(row=0, column=1, padx=(0, 12), pady=4, sticky="w")
+        self.fast_preset_button.grid(row=0, column=1, padx=(8, 12), pady=4, sticky="w")
         self.slow_preset_button = ttk.Button(
-            ga_frame,
+            ga_header,
             text="Slow",
             width=GA_ENTRY_WIDTH,
+            takefocus=False,
             command=lambda: self._apply_preset(SLOW_PRESET_LABEL),
         )
         self.slow_preset_button.grid(row=0, column=2, padx=(8, 8), pady=4, sticky="w")
+        self.ga_toggle_button = ttk.Button(
+            ga_header,
+            text="展开参数",
+            width=8,
+            takefocus=False,
+            command=self._toggle_ga_params,
+        )
+        self.ga_toggle_button.grid(row=0, column=5, padx=(8, 0), pady=4, sticky="e")
 
-        ttk.Label(ga_frame, text="Population").grid(row=1, column=0, padx=(0, 8), pady=4, sticky="w")
-        self.population_entry = ttk.Entry(ga_frame, textvariable=self.population_var, width=GA_ENTRY_WIDTH)
-        self.population_entry.grid(row=1, column=1, padx=(0, 12), pady=4, sticky="w")
-        ttk.Label(ga_frame, text="Generations").grid(row=1, column=2, padx=(8, 8), pady=4, sticky="w")
-        self.generations_entry = ttk.Entry(ga_frame, textvariable=self.generations_var, width=GA_ENTRY_WIDTH)
-        self.generations_entry.grid(row=1, column=3, padx=(0, 12), pady=4, sticky="w")
-        ttk.Label(ga_frame, text="Crossover").grid(row=2, column=0, padx=(0, 8), pady=4, sticky="w")
-        self.crossover_entry = ttk.Entry(ga_frame, textvariable=self.crossover_var, width=GA_ENTRY_WIDTH)
-        self.crossover_entry.grid(row=2, column=1, padx=(0, 12), pady=4, sticky="w")
-        ttk.Label(ga_frame, text="Mutation").grid(row=2, column=2, padx=(8, 8), pady=4, sticky="w")
-        self.mutation_entry = ttk.Entry(ga_frame, textvariable=self.mutation_var, width=GA_ENTRY_WIDTH)
-        self.mutation_entry.grid(row=2, column=3, padx=(0, 12), pady=4, sticky="w")
-        ttk.Label(ga_frame, text="Max depth").grid(row=3, column=0, padx=(0, 8), pady=4, sticky="w")
-        self.max_depth_entry = ttk.Entry(ga_frame, textvariable=self.max_depth_var, width=GA_ENTRY_WIDTH)
-        self.max_depth_entry.grid(row=3, column=1, padx=(0, 12), pady=4, sticky="w")
-        ttk.Label(ga_frame, text="Tournament").grid(row=3, column=2, padx=(8, 8), pady=4, sticky="w")
-        self.tournament_entry = ttk.Entry(ga_frame, textvariable=self.tournament_var, width=GA_ENTRY_WIDTH)
-        self.tournament_entry.grid(row=3, column=3, padx=(0, 12), pady=4, sticky="w")
+        self.ga_params_container = ttk.Frame(ga_frame)
+        self.ga_params_container.grid(row=1, column=0, sticky="ew")
+
+        ttk.Label(self.ga_params_container, text="Population").grid(row=0, column=0, padx=(0, 8), pady=4, sticky="w")
+        self.population_entry = ttk.Entry(
+            self.ga_params_container, textvariable=self.population_var, width=GA_ENTRY_WIDTH
+        )
+        self.population_entry.grid(row=0, column=1, padx=(0, 12), pady=4, sticky="w")
+        ttk.Label(self.ga_params_container, text="Generations").grid(row=0, column=2, padx=(8, 8), pady=4, sticky="w")
+        self.generations_entry = ttk.Entry(
+            self.ga_params_container, textvariable=self.generations_var, width=GA_ENTRY_WIDTH
+        )
+        self.generations_entry.grid(row=0, column=3, padx=(0, 12), pady=4, sticky="w")
+        ttk.Label(self.ga_params_container, text="Crossover").grid(row=1, column=0, padx=(0, 8), pady=4, sticky="w")
+        self.crossover_entry = ttk.Entry(
+            self.ga_params_container, textvariable=self.crossover_var, width=GA_ENTRY_WIDTH
+        )
+        self.crossover_entry.grid(row=1, column=1, padx=(0, 12), pady=4, sticky="w")
+        ttk.Label(self.ga_params_container, text="Mutation").grid(row=1, column=2, padx=(8, 8), pady=4, sticky="w")
+        self.mutation_entry = ttk.Entry(self.ga_params_container, textvariable=self.mutation_var, width=GA_ENTRY_WIDTH)
+        self.mutation_entry.grid(row=1, column=3, padx=(0, 12), pady=4, sticky="w")
+        ttk.Label(self.ga_params_container, text="Max depth").grid(row=2, column=0, padx=(0, 8), pady=4, sticky="w")
+        self.max_depth_entry = ttk.Entry(
+            self.ga_params_container, textvariable=self.max_depth_var, width=GA_ENTRY_WIDTH
+        )
+        self.max_depth_entry.grid(row=2, column=1, padx=(0, 12), pady=4, sticky="w")
+        ttk.Label(self.ga_params_container, text="Tournament").grid(row=2, column=2, padx=(8, 8), pady=4, sticky="w")
+        self.tournament_entry = ttk.Entry(
+            self.ga_params_container, textvariable=self.tournament_var, width=GA_ENTRY_WIDTH
+        )
+        self.tournament_entry.grid(row=2, column=3, padx=(0, 12), pady=4, sticky="w")
+        self.editable_entries = [
+            self.target_entry,
+            self.population_entry,
+            self.generations_entry,
+            self.max_depth_entry,
+            self.crossover_entry,
+            self.mutation_entry,
+            self.tournament_entry,
+        ]
+        self._set_ga_params_collapsed(True)
 
         results_frame = ttk.LabelFrame(sidebar, text="结果", padding=8)
         results_frame.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
@@ -242,7 +373,7 @@ class TopologySearchApp:
         preview_side.rowconfigure(1, weight=1)
         content.add(preview_side, weight=5)
 
-        tree_frame = ttk.LabelFrame(preview_side, text="当前树结构", padding=8)
+        tree_frame = ttk.LabelFrame(preview_side, text="树结构", padding=8)
         tree_frame.grid(row=0, column=0, sticky="nsew")
         tree_frame.columnconfigure(0, weight=1)
         tree_frame.rowconfigure(0, weight=1)
@@ -280,7 +411,7 @@ class TopologySearchApp:
 
     def start_search(self) -> None:
         if self.search_thread and self.search_thread.is_alive():
-            messagebox.showinfo("搜索进行中", "NSGA-II 仍在运行，请等待当前搜索完成。")
+            self.request_stop_search()
             return
 
         try:
@@ -289,12 +420,12 @@ class TopologySearchApp:
             messagebox.showerror("参数无效", str(exc))
             return
 
+        self.stop_search_event.clear()
+        self.stop_requested = False
         self._clear_results()
         self._set_busy(True)
         self.current_settings = settings
-        self._append_log(
-            f"Starting search for target={settings.target_value} ({float(settings.target_value):.6f})"
-        )
+        self._append_log(f"Starting search for target={self._format_target_display(settings)}")
         self._append_log(
             "Using "
             f"population={settings.population_size}, generations={settings.max_generations}, "
@@ -318,7 +449,11 @@ class TopologySearchApp:
                 settings.crossover_rate,
                 settings.mutation_rate,
             )
-            solver.run(progress_callback=self._queue_progress_update, progress_interval=10)
+            completed = solver.run(
+                progress_callback=self._queue_progress_update,
+                progress_interval=10,
+                should_stop=self.stop_search_event.is_set,
+            )
 
             solutions: list[SolutionSummary] = []
             for index, individual in enumerate(solver.get_sorted_unique_front()[:RESULT_LIMIT], start=1):
@@ -338,7 +473,7 @@ class TopologySearchApp:
                     )
                 )
 
-            self.root.after(0, lambda: self._finish_search(solutions, settings))
+            self.root.after(0, lambda: self._finish_search(solutions, settings, completed))
         except Exception as exc:
             details = traceback.format_exc()
             self.root.after(0, lambda: self._handle_search_error(exc, details))
@@ -361,13 +496,23 @@ class TopologySearchApp:
         self.status_var.set(status)
         self._append_log(status)
 
-    def _finish_search(self, solutions: list[SolutionSummary], settings: SearchSettings) -> None:
+    def _finish_search(self, solutions: list[SolutionSummary], settings: SearchSettings, completed: bool) -> None:
         self._set_busy(False)
+        self.stop_requested = False
+        self.stop_search_event.clear()
         self.solutions = solutions
 
         if not solutions:
-            self.status_var.set("搜索完成，但没有找到有效的 Pareto 结果。")
-            self._append_log("Search completed with no valid Pareto solutions.")
+            self.status_var.set(
+                "搜索已中止，但没有可返回的 Pareto 结果。"
+                if not completed
+                else "搜索完成，但没有找到有效的 Pareto 结果。"
+            )
+            self._append_log(
+                "Search stopped with no valid Pareto solutions."
+                if not completed
+                else "Search completed with no valid Pareto solutions."
+            )
             return
 
         for solution in solutions:
@@ -384,10 +529,16 @@ class TopologySearchApp:
                 ),
             )
 
-        self.status_var.set(
-            f"target={settings.target_value} ≈ {float(settings.target_value):.6f} 搜索完成。点击任意结果可查看布局预览。"
-        )
-        self._append_log(f"Search completed. Displaying {len(solutions)} solutions.")
+        if completed:
+            self.status_var.set(
+                f"target={self._format_target_display(settings)} 搜索完成。点击任意结果可查看布局预览。"
+            )
+            self._append_log(f"Search completed. Displaying {len(solutions)} solutions.")
+        else:
+            self.status_var.set(
+                f"target={self._format_target_display(settings)} 搜索已中止，已返回当前结果。"
+            )
+            self._append_log(f"Search stopped. Displaying {len(solutions)} partial solutions.")
         first_iid = self._solution_iid(1)
         self.results_tree.selection_set(first_iid)
         self.results_tree.focus(first_iid)
@@ -396,6 +547,8 @@ class TopologySearchApp:
 
     def _handle_search_error(self, exc: Exception, details: str) -> None:
         self._set_busy(False)
+        self.stop_requested = False
+        self.stop_search_event.clear()
         self.status_var.set("搜索失败")
         self._append_log("Search failed:")
         self._append_log(details)
@@ -455,23 +608,69 @@ class TopologySearchApp:
             self.tournament_entry,
         ]
         if busy:
-            self.run_button.configure(state="disabled")
+            self.run_button.configure(state="normal", text="中止")
             self.fast_preset_button.configure(state="disabled")
             self.slow_preset_button.configure(state="disabled")
+            if self.target_mode_button is not None:
+                self.target_mode_button.configure(state="disabled")
             for entry in editable_entries:
                 entry.configure(state="disabled")
         else:
-            self.run_button.configure(state="normal")
+            self.run_button.configure(state="normal", text="搜索")
             self.fast_preset_button.configure(state="normal")
             self.slow_preset_button.configure(state="normal")
+            if self.target_mode_button is not None:
+                self.target_mode_button.configure(state="normal")
             for entry in editable_entries:
                 entry.configure(state="normal")
+
+    def request_stop_search(self) -> None:
+        if not self.search_thread or not self.search_thread.is_alive():
+            return
+        if self.stop_requested:
+            return
+        self.stop_requested = True
+        self.stop_search_event.set()
+        self.status_var.set("正在中止搜索并整理当前结果...")
+        self._append_log("Stop requested. Finalizing current Pareto results.")
 
     def _append_log(self, message: str) -> None:
         self.log_text.configure(state="normal")
         self.log_text.insert("end", message + "\n")
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
+
+    def _toggle_target_mode(self) -> None:
+        self.target_mode = TARGET_MODE_RATE if self.target_mode == TARGET_MODE_FRACTION else TARGET_MODE_FRACTION
+        self._activate_target_placeholder()
+        self._refresh_target_mode_widgets()
+
+    def _refresh_target_mode_widgets(self) -> None:
+        if self.target_mode_button is not None:
+            self.target_mode_button.configure(text="分数" if self.target_mode == TARGET_MODE_RATE else "小数")
+        if self.target_suffix_label is not None:
+            if self.target_mode == TARGET_MODE_RATE:
+                self.target_suffix_label.grid()
+            else:
+                self.target_suffix_label.grid_remove()
+
+    def _format_target_display(self, settings: SearchSettings) -> str:
+        if settings.target_input_mode == TARGET_MODE_RATE:
+            return format_target_expression(settings.target_rate_per_min)
+        return format_fraction_target_expression(settings.target_value)
+
+    def _toggle_ga_params(self) -> None:
+        self._set_ga_params_collapsed(not self.ga_params_collapsed)
+
+    def _set_ga_params_collapsed(self, collapsed: bool) -> None:
+        self.ga_params_collapsed = collapsed
+        if self.ga_params_container is not None:
+            if collapsed:
+                self.ga_params_container.grid_remove()
+            else:
+                self.ga_params_container.grid()
+        if self.ga_toggle_button is not None:
+            self.ga_toggle_button.configure(text="展开参数" if collapsed else "折叠参数")
 
     def _apply_initial_layout(self) -> None:
         if self.content is None or self._initial_layout_applied:
@@ -487,6 +686,48 @@ class TopologySearchApp:
     def _on_search_frame_resize(self, event: tk.Event) -> None:
         wraplength = max(event.width - 24, 40)
         self.status_label.configure(wraplength=wraplength)
+
+    def _activate_target_placeholder(self) -> None:
+        self.target_placeholder_active = True
+        if self.target_mode == TARGET_MODE_RATE:
+            self.target_var.set(DEFAULT_TARGET_RATE_PLACEHOLDER)
+        else:
+            self.target_var.set(DEFAULT_TARGET_FRACTION_PLACEHOLDER)
+        self.target_entry.configure(foreground=self.placeholder_entry_foreground)
+
+    def _deactivate_target_placeholder(self) -> None:
+        if not self.target_placeholder_active:
+            return
+        self.target_placeholder_active = False
+        self.target_var.set("")
+        self.target_entry.configure(foreground=self.default_entry_foreground)
+
+    def _on_target_focus_in(self, _event: tk.Event) -> None:
+        self._deactivate_target_placeholder()
+
+    def _on_target_focus_out(self, _event: tk.Event) -> None:
+        if self.target_var.get().strip():
+            return
+        self._activate_target_placeholder()
+
+    def _clear_entry_selection_on_click(self, event: tk.Event) -> None:
+        clicked_widget = event.widget
+        clicked_entry = clicked_widget if isinstance(clicked_widget, ttk.Entry) else None
+
+        for entry in self.editable_entries:
+            if entry is clicked_entry:
+                continue
+            try:
+                entry.selection_clear()
+            except tk.TclError:
+                continue
+
+        if clicked_entry is not None:
+            return
+
+        focused_widget = self.root.focus_get()
+        if focused_widget in self.editable_entries:
+            self.root.focus_set()
 
     def _on_preview_resize(self, _event: tk.Event) -> None:
         if self.preview_source_image is None or self.preview_manual_zoom:
@@ -610,17 +851,12 @@ class TopologySearchApp:
 
         self.current_preview = ImageTk.PhotoImage(resized_image)
         self.preview_canvas.delete("all")
-        self.preview_canvas.create_image(metrics["x_offset"], metrics["y_offset"], anchor="nw", image=self.current_preview)
-        self.preview_canvas.configure(
-            scrollregion=(0, 0, metrics["content_width"], metrics["content_height"])
+        self.preview_canvas.create_image(
+            metrics["x_offset"], metrics["y_offset"], anchor="nw", image=self.current_preview
         )
+        self.preview_canvas.configure(scrollregion=(0, 0, metrics["content_width"], metrics["content_height"]))
 
-        if (
-            focus_x is not None
-            and focus_y is not None
-            and focus_rel_x is not None
-            and focus_rel_y is not None
-        ):
+        if focus_x is not None and focus_y is not None and focus_rel_x is not None and focus_rel_y is not None:
             new_canvas_x = metrics["x_offset"] + focus_rel_x * metrics["scaled_width"]
             new_canvas_y = metrics["y_offset"] + focus_rel_y * metrics["scaled_height"]
             self._move_preview_viewport_to(new_canvas_x - focus_x, new_canvas_y - focus_y, metrics)
@@ -665,10 +901,23 @@ class TopologySearchApp:
         )
 
     def _collect_settings(self) -> SearchSettings:
-        target_text = self.target_var.get().strip()
+        target_text = "" if self.target_placeholder_active else self.target_var.get().strip()
+        if not target_text:
+            target_text = (
+                DEFAULT_TARGET_RATE_PLACEHOLDER
+                if self.target_mode == TARGET_MODE_RATE
+                else DEFAULT_TARGET_FRACTION_PLACEHOLDER
+            )
         try:
-            target_value = Fraction(target_text)
+            if self.target_mode == TARGET_MODE_RATE:
+                target_rate_per_min = Fraction(target_text)
+                target_value = target_rate_per_min / TARGET_RATE_DIVISOR
+            else:
+                target_value = Fraction(target_text)
+                target_rate_per_min = target_value * TARGET_RATE_DIVISOR
         except Exception as exc:
+            if self.target_mode == TARGET_MODE_RATE:
+                raise ValueError("目标值必须是数字，例如 13.5。") from exc
             raise ValueError("目标值必须是类似 2/5、0.4 或 1/3 这样的格式。") from exc
 
         population_size = self._parse_int(self.population_var.get(), "Population", minimum=2)
@@ -682,7 +931,9 @@ class TopologySearchApp:
             raise ValueError("Tournament 不能大于 Population。")
 
         return SearchSettings(
+            target_input_mode=self.target_mode,
             target_value=target_value,
+            target_rate_per_min=target_rate_per_min,
             population_size=population_size,
             max_generations=max_generations,
             max_depth=max_depth,
@@ -716,7 +967,7 @@ class TopologySearchApp:
 
 
 def run_smoke_test(output_path: Path | None = None) -> Path:
-    target_value = Fraction(DEFAULT_TARGET)
+    target_value = DEFAULT_TARGET
     Config.TARGET_VAL = float(target_value)
     solver = NSGA2(40, 20, Config.CROSSOVER_RATE, Config.MUTATION_RATE)
     solver.run(progress_callback=None, progress_interval=5)

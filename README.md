@@ -27,5 +27,5 @@ python gui/gui_app.py
 ## 打包
 
 ```bash
-pyinstaller EndFieldConveyerBelt.spec
+pyinstaller EndfieldBeltSplitter.spec
 ```

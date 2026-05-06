@@ -260,6 +260,46 @@ class NSGA2(object):
                 offspring.append(child_2)
         
         return offspring[:self.population_size]
+
+    def generate_offspring_until_stopped(
+        self,
+        should_stop: Optional[Callable[[], bool]] = None,
+    ) -> List[Individual]:
+        offspring = []
+
+        while len(offspring) < self.population_size:
+            if should_stop and should_stop():
+                break
+
+            parent_1 = self.tournament_selection()
+            parent_2 = self.tournament_selection()
+
+            while parent_1 is parent_2:
+                if should_stop and should_stop():
+                    break
+                parent_2 = self.tournament_selection()
+            if should_stop and should_stop():
+                break
+
+            if random.random() < self.crossover_rate:
+                child_1, child_2 = self.crossover(parent_1, parent_2)
+            else:
+                child_1 = Individual(parent_1.chromosome.deep_copy())
+                child_2 = Individual(parent_2.chromosome.deep_copy())
+
+            if random.random() <= self.mutation_rate:
+                child_1 = self.mutation(child_1)
+            if random.random() <= self.mutation_rate:
+                child_2 = self.mutation(child_2)
+
+            if Node.is_valid(child_1.chromosome) and Node.is_valid(child_2.chromosome):
+                offspring.extend([child_1, child_2])
+            elif Node.is_valid(child_1.chromosome):
+                offspring.append(child_1)
+            elif Node.is_valid(child_2.chromosome):
+                offspring.append(child_2)
+
+        return offspring[:self.population_size]
     
     # Select next generation
     def environmental_selection(self, offspring: List[Individual]) -> None:
@@ -290,7 +330,8 @@ class NSGA2(object):
         self,
         progress_callback: Optional[Callable[[dict], None]] = None,
         progress_interval: int = 10,
-    ) -> None:
+        should_stop: Optional[Callable[[], bool]] = None,
+    ) -> bool:
         self.initialize_population()
         self.evaluate_population(self.population)
         
@@ -298,10 +339,19 @@ class NSGA2(object):
         for front in self.fronts:
             self.calculate_crowding_distance(front)
         
+        completed = True
         for generation in range(self.max_generations):
+            if should_stop and should_stop():
+                completed = False
+                break
             self.generation = generation
-            offspring = self.generate_offspring()
-            self.environmental_selection(offspring)
+            offspring = self.generate_offspring_until_stopped(should_stop=should_stop)
+            if offspring:
+                self.environmental_selection(offspring)
+
+            if should_stop and should_stop():
+                completed = False
+                break
             
             if generation % 10 == 0:
                 print(f"Generation {generation}: ")
@@ -315,6 +365,10 @@ class NSGA2(object):
 
             if progress_callback and (generation % progress_interval == 0 or generation == self.max_generations - 1):
                 progress_callback(self.get_progress_snapshot())
+
+        if progress_callback:
+            progress_callback(self.get_progress_snapshot())
+        return completed
 
     def get_sorted_unique_front(self) -> List[Individual]:
         if not self.fronts:

@@ -58,9 +58,9 @@ class Node(object):
                 case NodeType.SPLITTER_3:
                     cost = 1
                 case NodeType.STRUCTURE_A:
-                    cost = 1
-                case NodeType.STRUCTURE_B:
                     cost = 2
+                case NodeType.STRUCTURE_B:
+                    cost = 3
                 case NodeType.OUTPUT | NodeType.DISCARD:
                     cost = 0
             

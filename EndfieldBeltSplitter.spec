@@ -1,5 +1,24 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from pathlib import Path
+import re
+
+GUI_APP_PATH = Path("gui/gui_app.py")
+GUI_APP_TEXT = GUI_APP_PATH.read_text(encoding="utf-8")
+
+
+def _read_app_constant(name: str) -> str:
+    pattern = rf'^{name}\s*=\s*"([^"]+)"'
+    match = re.search(pattern, GUI_APP_TEXT, re.MULTILINE)
+    if match is None:
+        raise ValueError(f"Missing {name} in {GUI_APP_PATH}")
+    return match.group(1)
+
+
+APP_NAME = _read_app_constant("APP_NAME")
+APP_VERSION = _read_app_constant("APP_VERSION")
+PACKAGE_NAME = f"{APP_NAME}-v{APP_VERSION}"
+
 block_cipher = None
 
 a = Analysis(
@@ -39,7 +58,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='EndFieldConveyerBelt',
+    name=PACKAGE_NAME,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
