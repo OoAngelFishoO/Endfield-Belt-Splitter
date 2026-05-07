@@ -29,7 +29,7 @@ from layout_preview import render_tree_preview_from_dict
 
 APP_NAME = "EndfieldBeltSplitter"
 APP_TITLE = "明日方舟：终末地 - 传送带分流计算器"
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.2.0"
 
 TARGET_RATE_DIVISOR = Fraction(30, 1)
 DEFAULT_TARGET = Fraction(325, 799)
