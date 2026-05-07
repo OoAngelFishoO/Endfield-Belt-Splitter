@@ -113,14 +113,14 @@ DEFAULT_NODES: Dict[str, Node] = {
         name="structure_b",
         width=4,
         height=2,
-        input_port=(0.5, 0.5),
+        input_port=(3.5, 0.5),
         output_ports=((0.5, 1.5), (3.5, 1.5)),
         internal_paths=(
-            ((0.5, 0.5), (0.5, 1.5)),  # 左
-            ((0.5, 0.5), (3.5, 0.5), (3.5, 1.5)),  # 右上
-            ((0.5, 1.5), (3.5, 1.5)),  # 右下
+            ((3.5, 0.5), (0.5, 0.5), (0.5, 1.5)),  # 左上
+            ((3.5, 1.5), (0.5, 1.5)),  # 左下
+            ((3.5, 0.5), (3.5, 1.5)),  # 右
         ),
-        machines=((0.0, 0.0, "splitter_down"), (0.0, 1.0, "merger_down"), (3.0, 1.0, "merger_down")),
+        machines=((3.0, 0.0, "splitter_down"), (3.0, 1.0, "splitter_down"), (0.0, 1.0, "merger_down")),
         label="B",
     ),
     "Output": Node(

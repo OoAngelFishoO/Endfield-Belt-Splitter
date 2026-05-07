@@ -29,7 +29,7 @@ from layout_preview import render_tree_preview_from_dict
 
 APP_NAME = "EndfieldBeltSplitter"
 APP_TITLE = "明日方舟：终末地 - 传送带分流计算器"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 
 TARGET_RATE_DIVISOR = Fraction(30, 1)
 DEFAULT_TARGET = Fraction(325, 799)
@@ -587,9 +587,7 @@ class TopologySearchApp:
             )
             self._append_log(f"Search completed. Displaying {len(solutions)} solutions.")
         else:
-            self.status_var.set(
-                f"target={self._format_target_display(settings)} 搜索已中止，已返回当前结果。"
-            )
+            self.status_var.set(f"target={self._format_target_display(settings)} 搜索已中止，已返回当前结果。")
             self._append_log(f"Search stopped. Displaying {len(solutions)} partial solutions.")
         first_iid = self._solution_iid(1)
         self.results_tree.selection_set(first_iid)
