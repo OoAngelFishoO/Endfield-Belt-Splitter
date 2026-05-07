@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import sys
 import threading
 import traceback
@@ -28,7 +29,7 @@ from layout_preview import render_tree_preview_from_dict
 
 APP_NAME = "EndfieldBeltSplitter"
 APP_TITLE = "明日方舟：终末地 - 传送带分流计算器"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 
 TARGET_RATE_DIVISOR = Fraction(30, 1)
 DEFAULT_TARGET = Fraction(325, 799)
@@ -38,11 +39,30 @@ DEFAULT_TARGET_RATE_PLACEHOLDER = f"{float(DEFAULT_TARGET_RATE):.1f}"
 RESULT_LIMIT = 20
 FAST_PRESET_LABEL = "Fast"
 SLOW_PRESET_LABEL = "Slow"
+BASE_WINDOW_WIDTH = 1600
+BASE_WINDOW_HEIGHT = 900
 DEFAULT_SIDEBAR_WIDTH = 300
 DEFAULT_TREE_HEIGHT = 180
 GA_ENTRY_WIDTH = 5
 TARGET_MODE_FRACTION = "fraction"
 TARGET_MODE_RATE = "rate"
+
+
+def configure_windows_dpi_awareness() -> None:
+    if sys.platform != "win32":
+        return
+
+    try:
+        # Prefer system DPI awareness for more stable IME/candidate window sizing on high-DPI displays.
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        return
+    except Exception:
+        pass
+
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
 
 
 @dataclass
@@ -126,10 +146,15 @@ def format_fraction_target_expression(target_value: Fraction | float | str) -> s
 
 class TopologySearchApp:
     def __init__(self) -> None:
+        configure_windows_dpi_awareness()
         self.root = Tk()
         self.root.title(f"{APP_TITLE} - v{APP_VERSION}")
-        self.root.state("zoomed")
         self._configure_ui_font()
+        self.ui_scale = 1.0
+        self.sidebar_width = DEFAULT_SIDEBAR_WIDTH
+        self.tree_height = DEFAULT_TREE_HEIGHT
+        self._configure_initial_window_metrics()
+        self.root.state("zoomed")
         self.default_entry_foreground = "black"
         self.placeholder_entry_foreground = "#888888"
 
@@ -169,6 +194,23 @@ class TopologySearchApp:
         self.root.bind_all("<Button-1>", self._clear_entry_selection_on_click, add="+")
         self.root.after(100, self._apply_initial_layout)
 
+    def _configure_initial_window_metrics(self) -> None:
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+
+        scale_x = screen_width / BASE_WINDOW_WIDTH
+        scale_y = screen_height / BASE_WINDOW_HEIGHT
+        self.ui_scale = min(max(min(scale_x, scale_y), 0.85), 1.5)
+
+        window_width = min(int(screen_width * 0.9), int(BASE_WINDOW_WIDTH * self.ui_scale))
+        window_height = min(int(screen_height * 0.9), int(BASE_WINDOW_HEIGHT * self.ui_scale))
+        self.root.geometry(
+            f"{window_width}x{window_height}+{max((screen_width - window_width) // 2, 0)}+{max((screen_height - window_height) // 2, 0)}"
+        )
+
+        self.sidebar_width = int(DEFAULT_SIDEBAR_WIDTH * self.ui_scale)
+        self.tree_height = int(DEFAULT_TREE_HEIGHT * self.ui_scale)
+
     def _configure_ui_font(self) -> None:
         preferred_families = [
             "Microsoft YaHei UI",
@@ -203,6 +245,16 @@ class TopologySearchApp:
             except tk.TclError:
                 continue
             named_font.configure(family=selected_family)
+
+        self._configure_treeview_style()
+
+    def _configure_treeview_style(self) -> None:
+        default_font = tkfont.nametofont("TkDefaultFont")
+        rowheight = max(default_font.metrics("linespace") + 8, 24)
+        heading_font = tkfont.nametofont("TkHeadingFont")
+        style = ttk.Style(self.root)
+        style.configure("Treeview", rowheight=rowheight, font=default_font)
+        style.configure("Treeview.Heading", font=heading_font)
 
     def _build_ui(self) -> None:
         self.root.columnconfigure(0, weight=1)
@@ -369,7 +421,7 @@ class TopologySearchApp:
 
         preview_side = ttk.Frame(content, padding=8)
         preview_side.columnconfigure(0, weight=1)
-        preview_side.rowconfigure(0, minsize=DEFAULT_TREE_HEIGHT, weight=0)
+        preview_side.rowconfigure(0, minsize=self.tree_height, weight=0)
         preview_side.rowconfigure(1, weight=1)
         content.add(preview_side, weight=5)
 
@@ -377,7 +429,7 @@ class TopologySearchApp:
         tree_frame.grid(row=0, column=0, sticky="nsew")
         tree_frame.columnconfigure(0, weight=1)
         tree_frame.rowconfigure(0, weight=1)
-        tree_frame.configure(height=DEFAULT_TREE_HEIGHT)
+        tree_frame.configure(height=self.tree_height)
         tree_frame.grid_propagate(False)
 
         self.tree_text = ScrolledText(tree_frame, wrap="none", height=8, state="disabled")
@@ -678,7 +730,7 @@ class TopologySearchApp:
 
         try:
             self.root.update_idletasks()
-            self.content.sashpos(0, DEFAULT_SIDEBAR_WIDTH)
+            self.content.sashpos(0, self.sidebar_width)
             self._initial_layout_applied = True
         except tk.TclError:
             self.root.after(100, self._apply_initial_layout)

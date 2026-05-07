@@ -13,19 +13,21 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from layout_generator import (
-    CANVAS_MARGIN,
     CELL_SIZE,
-    DEFAULT_TEMPLATES,
+    DEFAULT_NODES,
     MACHINE_IMAGE_HREFS,
+    Node,
     PlacedNode,
-    Template,
     TreeNode,
     absolute_port,
-    build_placement_positions,
+    build_internal_cell_paths,
+    build_machine_cells,
+    build_placement_scene,
+    build_root_input_points,
     build_route_points,
-    corner_arrow,
-    is_cell_center,
+    collect_direction_arrows,
     iter_edges,
+    terminal_title,
     tree_from_dict,
 )
 
@@ -43,30 +45,24 @@ ARROW_COLOR = (34, 34, 34, 230)
 
 def render_tree_preview_from_dict(
     tree_payload: dict,
-    templates: Dict[str, Template] | None = None,
+    node_defs: Dict[str, Node] | None = None,
     asset_dir: Path | None = None,
 ) -> Image.Image:
-    return render_tree_preview(tree_from_dict(tree_payload), templates=templates, asset_dir=asset_dir)
+    return render_tree_preview(tree_from_dict(tree_payload), node_defs=node_defs, asset_dir=asset_dir)
 
 
 def render_tree_preview(
     root: TreeNode,
-    templates: Dict[str, Template] | None = None,
+    node_defs: Dict[str, Node] | None = None,
     asset_dir: Path | None = None,
 ) -> Image.Image:
-    active_templates = templates or DEFAULT_TEMPLATES
-    positions: Dict[int, PlacedNode] = {}
-    build_placement_positions(root, positions, active_templates, left=CANVAS_MARGIN, top=CANVAS_MARGIN)
+    active_node_defs = node_defs or DEFAULT_NODES
+    scene = build_placement_scene(root, active_node_defs)
+    positions = scene.positions
 
-    placed_nodes = list(positions.values())
-    max_width = max(node.x + node.width for node in placed_nodes) + CANVAS_MARGIN
-    max_height = max(node.y + node.height for node in placed_nodes) + CANVAS_MARGIN
-    width_px = int(max_width * CELL_SIZE)
-    height_px = int(max_height * CELL_SIZE)
-
-    image = Image.new("RGBA", (width_px, height_px), BACKGROUND_COLOR)
+    image = Image.new("RGBA", (scene.width_px, scene.height_px), BACKGROUND_COLOR)
     draw = ImageDraw.Draw(image)
-    _draw_grid(draw, width_px, height_px)
+    _draw_grid(draw, scene.width_px, scene.height_px)
     _draw_root_input_route(draw, positions[id(root)])
 
     for parent, child_index, child in iter_edges(root):
@@ -76,16 +72,19 @@ def render_tree_preview(
         end = absolute_port(child_box, child_box.input_port)
         _draw_route(draw, parent_box, child_index, start, end)
 
-    if asset_dir is not None:
-        resolved_asset_dir = asset_dir
-    elif getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-        resolved_asset_dir = Path(sys._MEIPASS)
-    else:
-        resolved_asset_dir = Path(__file__).resolve().parent.parent
-    for placed in placed_nodes:
-        _render_node(image, draw, placed, active_templates[placed.node.kind], placed.node.value, resolved_asset_dir)
+    resolved_asset_dir = _resolve_asset_dir(asset_dir)
+    for placed in scene.placed_nodes:
+        _render_node(image, draw, placed, placed.node.value, resolved_asset_dir)
 
     return image
+
+
+def _resolve_asset_dir(asset_dir: Path | None) -> Path:
+    if asset_dir is not None:
+        return asset_dir
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS)
+    return Path(__file__).resolve().parent.parent
 
 
 def _draw_grid(draw: ImageDraw.ImageDraw, width_px: int, height_px: int) -> None:
@@ -96,9 +95,7 @@ def _draw_grid(draw: ImageDraw.ImageDraw, width_px: int, height_px: int) -> None
 
 
 def _draw_root_input_route(draw: ImageDraw.ImageDraw, root_box: PlacedNode) -> None:
-    input_x = root_box.x + root_box.input_port[0]
-    input_y = root_box.y + root_box.input_port[1]
-    _draw_cell_path(draw, [(input_x, input_y - 1.0), (input_x, input_y)])
+    _draw_cell_path(draw, build_root_input_points(root_box))
 
 
 def _draw_route(
@@ -127,70 +124,26 @@ def _render_node(
     image: Image.Image,
     draw: ImageDraw.ImageDraw,
     placed: PlacedNode,
-    template: Template,
     value: str | None,
     asset_dir: Path,
 ) -> None:
-    match template.style:
-        case "structure_a":
-            _render_structure_a(image, draw, placed, value, asset_dir)
-        case "structure_b":
-            _render_structure_b(image, draw, placed, value, asset_dir)
-        case "splitter_2":
-            _render_splitter(image, draw, placed, value, 2, asset_dir)
-        case "splitter_3":
-            _render_splitter(image, draw, placed, value, 3, asset_dir)
-        case "output":
-            _render_terminal(draw, placed, value, is_output=True)
-        case "discard":
-            _render_terminal(draw, placed, value, is_output=False)
-        case _:
-            _render_generic_box(draw, placed, value)
+    internal_paths = build_internal_cell_paths(placed)
+    machine_cells = build_machine_cells(placed)
+    if internal_paths or machine_cells:
+        for path_points in internal_paths:
+            _draw_cell_path(draw, list(path_points))
+        for cell_x, cell_y, machine_style in machine_cells:
+            _paste_machine(image, cell_x, cell_y, machine_style, asset_dir)
+        if placed.definition.label is not None:
+            _draw_value_label(draw, placed, placed.definition.label, value)
+        return
 
-
-def _render_structure_a(
-    image: Image.Image,
-    draw: ImageDraw.ImageDraw,
-    placed: PlacedNode,
-    value: str | None,
-    asset_dir: Path,
-) -> None:
-    _draw_internal_path(draw, placed, [(1.5, 0.5), (1.5, 1.5)])
-    _draw_internal_path(draw, placed, [(1.5, 0.5), (0.5, 0.5), (0.5, 1.5)])
-    _draw_internal_path(draw, placed, [(1.5, 0.5), (2.5, 0.5), (2.5, 1.5), (1.5, 1.5)])
-    _paste_machine(image, placed.x + 1.0, placed.y + 0.0, "splitter_down", asset_dir)
-    _paste_machine(image, placed.x + 1.0, placed.y + 1.0, "merger_down", asset_dir)
-    _draw_value_label(draw, placed, "A", value)
-
-
-def _render_structure_b(
-    image: Image.Image,
-    draw: ImageDraw.ImageDraw,
-    placed: PlacedNode,
-    value: str | None,
-    asset_dir: Path,
-) -> None:
-    _draw_internal_path(draw, placed, [(1.5, 0.5), (1.5, 1.5)])
-    _draw_internal_path(draw, placed, [(1.5, 0.5), (0.5, 0.5), (0.5, 1.5)])
-    _draw_internal_path(draw, placed, [(1.5, 1.5), (0.5, 1.5)])
-    _paste_machine(image, placed.x + 0.0, placed.y + 1.0, "splitter_down", asset_dir)
-    _paste_machine(image, placed.x + 1.0, placed.y + 0.0, "merger_down", asset_dir)
-    _paste_machine(image, placed.x + 1.0, placed.y + 1.0, "splitter_left", asset_dir)
-    _draw_value_label(draw, placed, "B", value)
-
-
-def _render_splitter(
-    image: Image.Image,
-    draw: ImageDraw.ImageDraw,
-    placed: PlacedNode,
-    value: str | None,
-    outputs: int,
-    asset_dir: Path,
-) -> None:
-    _draw_internal_path(draw, placed, [(1.5, 0.5), (0.5, 0.5)])
-    _draw_internal_path(draw, placed, [(1.5, 0.5), (2.5, 0.5)])
-    _paste_machine(image, placed.x + 1.0, placed.y + 0.0, "splitter_down", asset_dir)
-    _draw_value_label(draw, placed, f"S{outputs}", value)
+    if placed.definition.name == "output":
+        _render_terminal(draw, placed, value, is_output=True)
+    elif placed.definition.name == "discard":
+        _render_terminal(draw, placed, value, is_output=False)
+    else:
+        _render_generic_box(draw, placed, value)
 
 
 def _render_terminal(draw: ImageDraw.ImageDraw, placed: PlacedNode, value: str | None, is_output: bool) -> None:
@@ -200,7 +153,7 @@ def _render_terminal(draw: ImageDraw.ImageDraw, placed: PlacedNode, value: str |
     height = placed.height * CELL_SIZE
     fill = OUTPUT_FILL if is_output else DISCARD_FILL
     outline = OUTPUT_OUTLINE if is_output else DISCARD_OUTLINE
-    title = "输出" if is_output else "回流"
+    title = terminal_title(is_output)
     draw.rounded_rectangle(
         (x + 8, y + 8, x + width - 8, y + height - 8), radius=12, fill=fill, outline=outline, width=2
     )
@@ -231,11 +184,6 @@ def _render_generic_box(draw: ImageDraw.ImageDraw, placed: PlacedNode, value: st
     _draw_value_label(draw, placed, placed.node.kind, value)
 
 
-def _draw_internal_path(draw: ImageDraw.ImageDraw, placed: PlacedNode, points: List[Tuple[float, float]]) -> None:
-    absolute_points = [(placed.x + x, placed.y + y) for x, y in points]
-    _draw_cell_path(draw, absolute_points)
-
-
 def _draw_value_label(draw: ImageDraw.ImageDraw, placed: PlacedNode, name: str, value: str | None) -> None:
     x = (placed.x + placed.input_port[0] - 1.0) * CELL_SIZE
     first_line_y = (placed.y + placed.input_port[1] - 1.0) * CELL_SIZE - 8
@@ -248,46 +196,8 @@ def _draw_value_label(draw: ImageDraw.ImageDraw, placed: PlacedNode, name: str, 
 
 
 def _draw_direction_arrows(draw: ImageDraw.ImageDraw, points: List[Tuple[float, float]]) -> None:
-    for (cell_x, cell_y), arrow in _collect_direction_arrows(points).items():
+    for (cell_x, cell_y), arrow in collect_direction_arrows(points).items():
         _draw_arrow(draw, cell_x, cell_y, arrow)
-
-
-def _collect_direction_arrows(points: List[Tuple[float, float]]) -> Dict[Tuple[float, float], str]:
-    if len(points) < 2:
-        return {}
-
-    arrow_cells: Dict[Tuple[float, float], str] = {}
-    for (x1, y1), (x2, y2) in zip(points, points[1:]):
-        dx = x2 - x1
-        dy = y2 - y1
-        if dx and dy:
-            continue
-
-        if dx:
-            steps = int(round(abs(dx)))
-            arrow = "right" if dx > 0 else "left"
-            step_x = 1 if dx > 0 else -1
-            for i in range(1, steps + 1):
-                cell_x = x1 + i * step_x
-                cell_y = y1
-                if is_cell_center(cell_x, cell_y):
-                    arrow_cells[(cell_x, cell_y)] = arrow
-        elif dy:
-            steps = int(round(abs(dy)))
-            arrow = "down" if dy > 0 else "up"
-            step_y = 1 if dy > 0 else -1
-            for i in range(1, steps + 1):
-                cell_x = x1
-                cell_y = y1 + i * step_y
-                if is_cell_center(cell_x, cell_y):
-                    arrow_cells[(cell_x, cell_y)] = arrow
-
-    for prev_point, turn_point, next_point in zip(points, points[1:], points[2:]):
-        turn_arrow = corner_arrow(prev_point, turn_point, next_point)
-        if turn_arrow and is_cell_center(turn_point[0], turn_point[1]):
-            arrow_cells[turn_point] = turn_arrow
-
-    return arrow_cells
 
 
 def _draw_arrow(draw: ImageDraw.ImageDraw, cell_x: float, cell_y: float, arrow: str) -> None:
